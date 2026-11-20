@@ -1,0 +1,115 @@
+name: Build WinDivert - Optimized Kernel Driver
+
+on:
+  workflow_dispatch:
+    inputs:
+      driver_icf:
+        description: 'Enable driver /OPT:ICF (experimental; default off)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  optimized-build:
+    name: Optimized WinDivert VS${{ matrix.vs }} (x86/x64 DLL, x64 driver)
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - vs: '2022'
+            runner: windows-2022
+          - vs: '2026'
+            runner: windows-2025
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # Edits only this runner's checkout. The repository's original
+      # build-windivert-modern.yml and sys/windivert.vcxproj remain unchanged.
+      - name: Enable kernel Release optimizations in the temporary checkout
+        shell: pwsh
+        env:
+          DRIVER_ICF: ${{ inputs.driver_icf }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = 'sys/windivert.vcxproj'
+          if (-not (Test-Path -LiteralPath $project)) { throw "Missing $project" }
+          $source = [System.IO.File]::ReadAllText((Resolve-Path $project).Path)
+          $needle = ' <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />'
+          if (-not $source.Contains($needle)) {
+              throw 'Cannot locate Microsoft.Cpp.targets import in driver project'
+          }
+          $icf = if ($env:DRIVER_ICF -eq 'true') { 'true' } else { 'false' }
+          $settings = @'
+           <!-- CI-only optimized Release x64 driver settings. No AVX2 in kernel mode. -->
+           <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+            <WholeProgramOptimization>true</WholeProgramOptimization>
+            <LinkIncremental>false</LinkIncremental>
+           </PropertyGroup>
+           <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+            <ClCompile>
+             <Optimization>MaxSpeed</Optimization>
+             <IntrinsicFunctions>true</IntrinsicFunctions>
+             <FunctionLevelLinking>true</FunctionLevelLinking>
+             <WholeProgramOptimization>true</WholeProgramOptimization>
+            </ClCompile>
+            <Link>
+             <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+             <OptimizeReferences>true</OptimizeReferences>
+             <EnableCOMDATFolding>__ICF__</EnableCOMDATFolding>
+            </Link>
+           </ItemDefinitionGroup>
+          '@
+          $settings = $settings.Replace('__ICF__', $icf)
+          $updated = $source.Replace($needle, $settings + "`r`n" + $needle)
+          # Fail early if the inserted XML is invalid; do not continue to MSBuild.
+          $null = [xml]$updated
+          [System.IO.File]::WriteAllText((Resolve-Path $project).Path, $updated)
+          Write-Host "Optimized driver: /O2 /Oi /Gy /GL /LTCG /OPT:REF; /OPT:ICF=$icf"
+          Write-Host 'Original repository project files are not committed or pushed.'
+
+      - name: Build DLLs, examples and optimized x64 driver
+        shell: pwsh
+        env:
+          VS_VERSION: ${{ matrix.vs }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $flags = @{
+              VSVersion = $env:VS_VERSION
+              Architecture = 'Both'
+              IncludeDriver = $true
+          }
+          & ./msvc-build-modern.ps1 @flags
+          if (-not $?) { throw 'WinDivert build failed' }
+
+      - name: Package optimized binaries
+        shell: pwsh
+        env:
+          VS_VERSION: ${{ matrix.vs }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($folder in @('install/MSVC/i386', 'install/MSVC/amd64')) {
+              foreach ($file in @('WinDivert.dll', 'WinDivert.lib')) {
+                  $path = Join-Path $folder $file
+                  if (-not (Test-Path -LiteralPath $path)) { throw "Missing $path" }
+              }
+          }
+          $driver = 'install/MSVC/amd64/WinDivert64.sys'
+          if (-not (Test-Path -LiteralPath $driver)) { throw "Missing optimized driver: $driver" }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $zip = "dist/WinDivert-Optimized-VS$env:VS_VERSION.zip"
+          Compress-Archive -Path 'install/MSVC' -DestinationPath $zip -CompressionLevel Optimal -Force
+          Write-Host "Packaged $zip"
+
+      - name: Upload optimized build
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinDivert-Optimized-VS${{ matrix.vs }}
+          path: dist/WinDivert-Optimized-VS${{ matrix.vs }}.zip
+          if-no-files-found: error
+          retention-days: 30
