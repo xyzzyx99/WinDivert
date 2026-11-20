@@ -95,7 +95,7 @@ function Invoke-WinDivertBuild {
     $buildSucceeded = $?
     $buildExitCode = $LASTEXITCODE
     if (-not $buildSucceeded -or $buildExitCode -ne 0) {
-        throw "MSBuild failed (exit code $buildExitCode): $ProjectPath [$Platform]"
+        throw "MSBuild failed (PowerShell success=$buildSucceeded; process exit code=$buildExitCode): $ProjectPath [$Platform]"
     }
 }
 
