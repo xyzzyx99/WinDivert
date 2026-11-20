@@ -61,6 +61,10 @@ jobs:
       
           & ./msvc-build-modern.ps1 @flags
 
+          if (-not $?) {
+              throw "Build script failed"
+          }
+
           if ($LASTEXITCODE -ne 0) { throw "Build script failed: $LASTEXITCODE" }
 
       - name: Package compilation outputs

@@ -13,6 +13,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$LASTEXITCODE = 0
 $repo = $PSScriptRoot
 
 # Detect installed VS/Build Tools using the Microsoft-supported vswhere utility.
