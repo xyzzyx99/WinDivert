@@ -80,6 +80,7 @@ function Invoke-WinDivertBuild {
         # WDK supplies WindowsKernelModeDriver10.0; it is NOT v143/v145.
         $argsList += @(
             '/p:PlatformToolset=WindowsKernelModeDriver10.0',
+            '/p:UseDebugLibraries=false',
             '/p:TargetVersion=Windows10',
             '/p:SignMode=Off',
             "/p:AssemblyName=$DriverAssemblyName"
