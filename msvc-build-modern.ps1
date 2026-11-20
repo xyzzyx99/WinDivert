@@ -77,7 +77,52 @@ function Invoke-WinDivertBuild {
         '/verbosity:minimal'
     )
     if ($IsDriver) {
-        # Restore the matching Windows SDK/WDK NuGet packages on CI runners.
+        # Restore packages before resolving SDK libraries. A fresh GitHub runner
+        # does not have the NuGet packages until Restore has completed.
+        $restoreArgs = @(
+            $ProjectPath, '/nologo', '/t:Restore',
+            '/p:Configuration=Release', "/p:Platform=$Platform",
+            '/p:PlatformToolset=WindowsKernelModeDriver10.0',
+            '/verbosity:minimal'
+        )
+        & $msbuild @restoreArgs
+        $restoreSucceeded = $?
+        $restoreExitCode = $LASTEXITCODE
+        if (-not $restoreSucceeded -or $restoreExitCode -ne 0) {
+            throw "WDK/SDK NuGet restore failed: $ProjectPath [$Platform]"
+        }
+
+        # The common Microsoft.Windows.SDK.CPP NuGet package does not contain
+        # the architecture-specific UM uuid.lib. Locate the real file in the
+        # SDK.CPP.x64 / SDK.CPP.x86 NuGet package or an installed Windows SDK.
+        $sdkArch = if ($Platform -eq 'Win32') { 'x86' } else { 'x64' }
+        $sdkRoots = @()
+        if ($env:NUGET_PACKAGES) {
+            $sdkRoots += (Join-Path $env:NUGET_PACKAGES "microsoft.windows.sdk.cpp.$sdkArch")
+        }
+        if ($env:USERPROFILE) {
+            $sdkRoots += (Join-Path $env:USERPROFILE ".nuget\packages\microsoft.windows.sdk.cpp.$sdkArch")
+        }
+        if (${env:ProgramFiles(x86)}) {
+            $sdkRoots += (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Lib')
+        }
+        $uuidLib = $null
+        foreach ($sdkRoot in ($sdkRoots | Select-Object -Unique)) {
+            if (-not (Test-Path -LiteralPath $sdkRoot)) { continue }
+            $uuidLib = Get-ChildItem -LiteralPath $sdkRoot -Filter 'uuid.lib' -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match "[\\/]um[\\/]$sdkArch[\\/]uuid\.lib$" } |
+                Sort-Object -Property FullName -Descending |
+                Select-Object -First 1
+            if ($null -ne $uuidLib) { break }
+        }
+        if ($null -eq $uuidLib) {
+            throw "Cannot locate $sdkArch uuid.lib after restore. Checked: $($sdkRoots -join '; ')"
+        }
+        $sdkLibDir = $uuidLib.DirectoryName
+        Write-Host "Using SDK UUID library: $($uuidLib.FullName)"
+        # windivert.vcxproj links $(SDK_LIB_PATH)\uuid.lib. Override the
+        # incorrect path to the common NuGet package with the actual directory.
+        $argsList += "/p:SDK_LIB_PATH=$sdkLibDir"
         $argsList += '/restore'
         # WDK supplies WindowsKernelModeDriver10.0; it is NOT v143/v145.
         $argsList += @(
