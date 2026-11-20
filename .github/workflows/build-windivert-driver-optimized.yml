@@ -87,6 +87,63 @@ jobs:
           & ./msvc-build-modern.ps1 @flags
           if (-not $?) { throw 'WinDivert build failed' }
 
+      # Generate a throwaway test certificate for this CI job, embed its signature
+      # in the x64 driver, verify it, and export ONLY the public .cer file.
+      # This is NOT Microsoft production signing and does not bypass Windows
+      # Code Integrity. The target test VM must trust the .cer and use Test Mode.
+      - name: Test-sign WinDivert64.sys
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $driver = (Resolve-Path 'install/MSVC/amd64/WinDivert64.sys').Path
+          $publicCert = Join-Path (Resolve-Path 'install/MSVC').Path 'WinDivert-Optimized-Test.cer'
+
+          # Choose the newest installed x64 Windows SDK SignTool.
+          $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+          if (-not (Test-Path -LiteralPath $sdkBin)) {
+              throw "Windows SDK tools not found: $sdkBin"
+          }
+          $tools = @(Get-ChildItem -Path (Join-Path $sdkBin '*/x64/signtool.exe') -File -ErrorAction SilentlyContinue |
+              Sort-Object -Property FullName -Descending)
+          if ($tools.Count -eq 0) {
+              throw "signtool.exe (x64) not found under $sdkBin"
+          }
+          $signTool = $tools[0].FullName
+          Write-Host "Using SignTool: $signTool"
+
+          # A new certificate for every job. Its private key never leaves the runner.
+          $cert = New-SelfSignedCertificate `
+              -Type CodeSigningCert `
+              -Subject 'CN=WinDivert Optimized CI Test' `
+              -CertStoreLocation 'Cert:\CurrentUser\My' `
+              -KeyAlgorithm RSA -KeyLength 3072 -HashAlgorithm SHA256 `
+              -KeyExportPolicy NonExportable `
+              -NotAfter (Get-Date).AddYears(2)
+          if (-not $cert -or -not $cert.HasPrivateKey) {
+              throw 'Failed to create a test code-signing certificate with a private key'
+          }
+          Export-Certificate -Cert $cert -FilePath $publicCert -Force | Out-Null
+
+          # Trust only in this disposable runner so /pa verifies the chain.
+          # On your TEST VM, import the .cer into LocalMachine Root and
+          # TrustedPublisher; enable test-signing separately.
+          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+
+          & $signTool sign /v /fd SHA256 /s My /sha1 $cert.Thumbprint $driver
+          if ($LASTEXITCODE -ne 0) { throw "SignTool signing failed ($LASTEXITCODE)" }
+
+          & $signTool verify /pa /v $driver
+          if ($LASTEXITCODE -ne 0) { throw "SignTool Authenticode verification failed ($LASTEXITCODE)" }
+          $signature = Get-AuthenticodeSignature -FilePath $driver
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
+              throw "Unexpected signature status or certificate: $($signature.Status)"
+          }
+          Write-Host "TEST-SIGNED driver: $driver"
+          Write-Host "Public test certificate: $publicCert"
+          Write-Host 'Warning: this is a TEST signature, not Microsoft kernel production signing.'
+
       - name: Package optimized binaries
         shell: pwsh
         env:
@@ -101,15 +158,17 @@ jobs:
           }
           $driver = 'install/MSVC/amd64/WinDivert64.sys'
           if (-not (Test-Path -LiteralPath $driver)) { throw "Missing optimized driver: $driver" }
+          $publicCert = 'install/MSVC/WinDivert-Optimized-Test.cer'
+          if (-not (Test-Path -LiteralPath $publicCert)) { throw "Missing test certificate: $publicCert" }
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $zip = "dist/WinDivert-Optimized-VS$env:VS_VERSION.zip"
+          $zip = "dist/WinDivert-Optimized-TestSigned-VS$env:VS_VERSION.zip"
           Compress-Archive -Path 'install/MSVC' -DestinationPath $zip -CompressionLevel Optimal -Force
           Write-Host "Packaged $zip"
 
       - name: Upload optimized build
         uses: actions/upload-artifact@v4
         with:
-          name: WinDivert-Optimized-VS${{ matrix.vs }}
-          path: dist/WinDivert-Optimized-VS${{ matrix.vs }}.zip
+          name: WinDivert-Optimized-TestSigned-VS${{ matrix.vs }}
+          path: dist/WinDivert-Optimized-TestSigned-VS${{ matrix.vs }}.zip
           if-no-files-found: error
           retention-days: 30
