@@ -1,0 +1,22 @@
+WinDivert GitHub Actions workflow
+=================================
+
+The GitHub Actions workflow is: .github/workflows/build-windivert-modern.yml
+
+A second identical copy, build-windivert-modern.yml, is provided at the ZIP root
+for easy discovery, but ONLY the .github/workflows version is executed by GitHub.
+
+Extract the archive at the root of your WinDivert fork. Preserve hidden folders.
+If your extraction utility hides dot-directories, copy the standalone YAML file
+from this archive to .github/workflows/build-windivert-modern.yml.
+
+Apply windivert-vs-modern.patch once, then commit the changed project files and
+.github/workflows/build-windivert-modern.yml. The workflow also needs
+msvc-build-modern.ps1 in the repository root.
+
+GitHub Actions: after pushing to your default branch, visit Actions, select
+Build WinDivert (Visual Studio 2022 and 2026), then Run workflow. This workflow
+is manual-only (workflow_dispatch); it will NOT start automatically on git push.
+
+The project patch and script are supplied without a successful Windows build
+validation, so initial CI may reveal toolchain compatibility issues.

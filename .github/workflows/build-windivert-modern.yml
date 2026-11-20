@@ -1,0 +1,74 @@
+name: Build WinDivert (Visual Studio 2022 and 2026)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_driver:
+        description: 'Also build unsigned kernel driver (requires matching WDK/SDK)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - vs: '2022'
+            runner: windows-2022
+          - vs: '2026'
+            runner: windows-2025
+    name: WinDivert VS${{ matrix.vs }} (Win32 and x64)
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Display MSBuild and SDK information
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          & $vswhere -products '*' -property installationPath
+          if ($LASTEXITCODE -ne 0) { throw 'vswhere failed' }
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Lib' -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name
+
+      - name: Build user-mode library and examples (optionally unsigned driver)
+        shell: pwsh
+        env:
+          BUILD_DRIVER: ${{ inputs.build_driver }}
+          VS_VERSION: ${{ matrix.vs }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $flags = @('-VSVersion', $env:VS_VERSION, '-Architecture', 'Both')
+          if ($env:BUILD_DRIVER -eq 'true') { $flags += '-IncludeDriver' }
+          & ./msvc-build-modern.ps1 @flags
+          if ($LASTEXITCODE -ne 0) { throw "Build script failed: $LASTEXITCODE" }
+
+      - name: Package compilation outputs
+        shell: pwsh
+        env:
+          VS_VERSION: ${{ matrix.vs }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "WinDivert-VS$env:VS_VERSION"
+          New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
+          $folders = @('install/MSVC/i386', 'install/MSVC/amd64')
+          foreach ($folder in $folders) {
+            if (-not (Test-Path "$folder/WinDivert.dll")) { throw "Missing DLL: $folder" }
+            if (-not (Test-Path "$folder/WinDivert.lib")) { throw "Missing import library: $folder" }
+          }
+          Compress-Archive -Path 'install/MSVC' -DestinationPath "dist/$name.zip" -CompressionLevel Optimal -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinDivert-VS${{ matrix.vs }}
+          path: dist/WinDivert-VS${{ matrix.vs }}.zip
+          if-no-files-found: error
+          retention-days: 30
