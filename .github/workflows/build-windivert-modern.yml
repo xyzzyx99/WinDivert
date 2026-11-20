@@ -47,7 +47,20 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $flags = @('-VSVersion', $env:VS_VERSION, '-Architecture', 'Both')
           if ($env:BUILD_DRIVER -eq 'true') { $flags += '-IncludeDriver' }
+
+          $ErrorActionPreference = 'Stop'
+      
+          $flags = @{
+              VSVersion = '${{ matrix.vs }}'
+              Architecture = 'Both'
+          }
+      
+          if ('${{ inputs.build_driver }}' -eq 'true') {
+              $flags.IncludeDriver = $true
+          }
+      
           & ./msvc-build-modern.ps1 @flags
+
           if ($LASTEXITCODE -ne 0) { throw "Build script failed: $LASTEXITCODE" }
 
       - name: Package compilation outputs
