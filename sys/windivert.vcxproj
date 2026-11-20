@@ -67,6 +67,22 @@
   <RootNamespace>WinDivert</RootNamespace>
   <ProjectName>WinDivert</ProjectName>
  </PropertyGroup>
+ <!-- Modern CI: acquire matching WDK and SDK through NuGet instead of
+      assuming the hosted runner includes kernel headers such as ntifs.h. -->
+ <PropertyGroup>
+  <TargetFramework>native</TargetFramework>
+  <_NuGetTargetFallbackMoniker>native,Version=v0.0</_NuGetTargetFallbackMoniker>
+  <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
+  <WDKVersion Condition="'$(WDKVersion)' == '' and '$(MSBuildAssemblyVersion)' &gt;= '18.0'">10.0.28000.2526</WDKVersion>
+  <WDKVersion Condition="'$(WDKVersion)' == '' and '$(MSBuildAssemblyVersion)' &lt; '18.0'">10.0.26100.6584</WDKVersion>
+  <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and '$(MSBuildAssemblyVersion)' &gt;= '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
+  <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and '$(MSBuildAssemblyVersion)' &lt; '18.0'">10.0.26100.0</WindowsTargetPlatformVersion>
+ </PropertyGroup>
+ <ItemGroup>
+  <PackageReference Include="Microsoft.Windows.SDK.CPP" Version="$(WDKVersion)" PrivateAssets="all" />
+  <PackageReference Include="Microsoft.Windows.SDK.CPP.x64" Version="$(WDKVersion)" PrivateAssets="all" />
+  <PackageReference Include="Microsoft.Windows.WDK.x64" Version="$(WDKVersion)" PrivateAssets="all" />
+ </ItemGroup>
  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props"/>
  <PropertyGroup Label="Configuration">
   <TargetVersion>Windows10</TargetVersion>

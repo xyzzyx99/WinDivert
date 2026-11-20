@@ -77,6 +77,8 @@ function Invoke-WinDivertBuild {
         '/verbosity:minimal'
     )
     if ($IsDriver) {
+        # Restore the matching Windows SDK/WDK NuGet packages on CI runners.
+        $argsList += '/restore'
         # WDK supplies WindowsKernelModeDriver10.0; it is NOT v143/v145.
         $argsList += @(
             '/p:PlatformToolset=WindowsKernelModeDriver10.0',
@@ -90,7 +92,11 @@ function Invoke-WinDivertBuild {
     }
     Write-Host "Building $ProjectPath ($Platform)" -ForegroundColor Cyan
     & $msbuild @argsList
-    if ($LASTEXITCODE -ne 0) { throw "MSBuild failed ($LASTEXITCODE): $ProjectPath [$Platform]" }
+    $buildSucceeded = $?
+    $buildExitCode = $LASTEXITCODE
+    if (-not $buildSucceeded -or $buildExitCode -ne 0) {
+        throw "MSBuild failed (exit code $buildExitCode): $ProjectPath [$Platform]"
+    }
 }
 
 $examples = @('flowtrack', 'netdump', 'netfilter', 'passthru',
@@ -127,8 +133,13 @@ foreach ($arch in $architectures) {
         Invoke-WinDivertBuild (Join-Path $repo 'test/test.vcxproj') $platform $output $false ''
     }
 
-    if ($IncludeDriver) {
-        $driverName = if ($arch -eq 'x86') { 'WinDivert32' } else { 'WinDivert64' }
+    # WDK 26100+ has no x86 kernel-mode driver support. The x86 DLL and
+    # examples are still built, but only the x64 driver is compiled here.
+    if ($IncludeDriver -and $arch -eq 'x86') {
+        Write-Warning 'Skipping WinDivert32.sys: modern WDKs do not support x86 kernel-mode driver builds.'
+    }
+    if ($IncludeDriver -and $arch -eq 'x64') {
+        $driverName = 'WinDivert64'
         Invoke-WinDivertBuild (Join-Path $repo 'sys/windivert.vcxproj') $platform $output $true $driverName
         $expectedDriver = Join-Path $output "$driverName.sys"
         if (-not (Test-Path -LiteralPath $expectedDriver)) {
