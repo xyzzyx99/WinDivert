@@ -83,7 +83,7 @@ function Invoke-WinDivertBuild {
             '/p:UseDebugLibraries=false',
             '/p:TargetVersion=Windows10',
             '/p:SignMode=Off',
-            "/p:AssemblyName=$DriverAssemblyName"
+            "/p:TargetName=$DriverAssemblyName"
         )
     } else {
         $argsList += "/p:PlatformToolset=$Toolset"
@@ -130,9 +130,19 @@ foreach ($arch in $architectures) {
     if ($IncludeDriver) {
         $driverName = if ($arch -eq 'x86') { 'WinDivert32' } else { 'WinDivert64' }
         Invoke-WinDivertBuild (Join-Path $repo 'sys/windivert.vcxproj') $platform $output $true $driverName
-        if (-not (Test-Path -LiteralPath (Join-Path $output "$driverName.sys"))) {
-            throw "Driver build completed but $driverName.sys was not found in $output"
+        $expectedDriver = Join-Path $output "$driverName.sys"
+        if (-not (Test-Path -LiteralPath $expectedDriver)) {
+            # Show where the driver actually went if the WDK ignores OutDir or TargetName.
+            $candidates = @(
+                Get-ChildItem -LiteralPath $output -Filter '*.sys' -File -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty FullName
+                Get-ChildItem -LiteralPath (Join-Path $repo 'sys') -Filter '*.sys' -File -Recurse -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty FullName
+            )
+            $found = if ($candidates.Count -gt 0) { ($candidates | Select-Object -Unique) -join '; ' } else { '(none)' }
+            throw "MSBuild returned success, but the expected driver was not found: $expectedDriver. Found .sys files: $found"
         }
+        Write-Host "Driver found: $expectedDriver" -ForegroundColor Green
         Write-Warning 'This locally compiled driver is UNSIGNED; normal Windows driver-loading policy may reject it.'
     }
     Write-Host "Completed ${arch}: $output" -ForegroundColor Green
