@@ -87,31 +87,15 @@ jobs:
           & ./msvc-build-modern.ps1 @flags
           if (-not $?) { throw 'WinDivert build failed' }
 
-      # Generate a throwaway test certificate for this CI job, embed its signature
-      # in the x64 driver, verify it, and export ONLY the public .cer file.
-      # This is NOT Microsoft production signing and does not bypass Windows
-      # Code Integrity. The target test VM must trust the .cer and use Test Mode.
-      - name: Test-sign WinDivert64.sys
-        shell: pwsh
+      # Use Windows PowerShell 5.1 for PKI operations: avoids known
+      # New-SelfSignedCertificate problems in PowerShell 7.5 on some systems.
+      # Splitting these steps makes a stalled operation easy to identify.
+      - name: Create disposable test-signing certificate
+        shell: powershell
+        timeout-minutes: 5
         run: |
           $ErrorActionPreference = 'Stop'
-          $driver = (Resolve-Path 'install/MSVC/amd64/WinDivert64.sys').Path
-          $publicCert = Join-Path (Resolve-Path 'install/MSVC').Path 'WinDivert-Optimized-Test.cer'
-
-          # Choose the newest installed x64 Windows SDK SignTool.
-          $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-          if (-not (Test-Path -LiteralPath $sdkBin)) {
-              throw "Windows SDK tools not found: $sdkBin"
-          }
-          $tools = @(Get-ChildItem -Path (Join-Path $sdkBin '*/x64/signtool.exe') -File -ErrorAction SilentlyContinue |
-              Sort-Object -Property FullName -Descending)
-          if ($tools.Count -eq 0) {
-              throw "signtool.exe (x64) not found under $sdkBin"
-          }
-          $signTool = $tools[0].FullName
-          Write-Host "Using SignTool: $signTool"
-
-          # A new certificate for every job. Its private key never leaves the runner.
+          Write-Host '[cert 1/3] Creating code-signing certificate (Windows PowerShell 5.1)'
           $cert = New-SelfSignedCertificate `
               -Type CodeSigningCert `
               -Subject 'CN=WinDivert Optimized CI Test' `
@@ -120,29 +104,56 @@ jobs:
               -KeyExportPolicy NonExportable `
               -NotAfter (Get-Date).AddYears(2)
           if (-not $cert -or -not $cert.HasPrivateKey) {
-              throw 'Failed to create a test code-signing certificate with a private key'
+              throw 'Certificate creation failed: no certificate or private key'
           }
+          Write-Host '[cert 2/3] Exporting public certificate'
+          $publicCert = Join-Path (Resolve-Path 'install/MSVC').Path 'WinDivert-Optimized-Test.cer'
           Export-Certificate -Cert $cert -FilePath $publicCert -Force | Out-Null
+          Write-Host '[cert 3/3] Making thumbprint available to the signing step'
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TEST_CERT_SHA1=$($cert.Thumbprint)`n", $utf8)
+          Write-Host "Certificate created: $($cert.Thumbprint)"
+          # No need to trust this throwaway root on the GitHub runner.
+          # The test VM needs to trust the public certificate separately.
 
-          # Trust only in this disposable runner so /pa verifies the chain.
-          # On your TEST VM, import the .cer into LocalMachine Root and
-          # TrustedPublisher; enable test-signing separately.
-          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
-          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+      - name: Test-sign WinDivert64.sys
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $driver = (Resolve-Path 'install/MSVC/amd64/WinDivert64.sys').Path
+          $publicCert = (Resolve-Path 'install/MSVC/WinDivert-Optimized-Test.cer').Path
+          if (-not $env:TEST_CERT_SHA1) { throw 'Missing test certificate thumbprint' }
 
-          & $signTool sign /v /fd SHA256 /s My /sha1 $cert.Thumbprint $driver
+          Write-Host '[sign 1/3] Locating SignTool'
+          $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+          if (-not (Test-Path -LiteralPath $sdkBin)) {
+              throw "Windows SDK tools not found: $sdkBin"
+          }
+          $tools = @(Get-ChildItem -Path (Join-Path $sdkBin '*/x64/signtool.exe') -File -ErrorAction SilentlyContinue |
+              Sort-Object -Property FullName -Descending)
+          if ($tools.Count -eq 0) { throw "signtool.exe (x64) not found under $sdkBin" }
+          $signTool = $tools[0].FullName
+          Write-Host "Using SignTool: $signTool"
+
+          Write-Host '[sign 2/3] Signing driver'
+          & $signTool sign /v /fd SHA256 /s My /sha1 $env:TEST_CERT_SHA1 $driver
           if ($LASTEXITCODE -ne 0) { throw "SignTool signing failed ($LASTEXITCODE)" }
 
-          & $signTool verify /pa /v $driver
-          if ($LASTEXITCODE -ne 0) { throw "SignTool Authenticode verification failed ($LASTEXITCODE)" }
+          Write-Host '[sign 3/3] Checking embedded signer certificate'
+          # A self-signed certificate is untrusted on this disposable runner.
+          # Do not run network-dependent chain/revocation verification here;
+          # check the embedded signer and the successful SignTool exit code.
           $signature = Get-AuthenticodeSignature -FilePath $driver
-          if ($signature.Status -ne 'Valid' -or
-              $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
-              throw "Unexpected signature status or certificate: $($signature.Status)"
+          if (-not $signature.SignerCertificate -or
+              $signature.SignerCertificate.Thumbprint -ne $env:TEST_CERT_SHA1 -or
+              $signature.Status -eq 'NotSigned' -or
+              $signature.Status -eq 'HashMismatch') {
+              throw "Missing or mismatched Authenticode signature: $($signature.Status)"
           }
-          Write-Host "TEST-SIGNED driver: $driver"
-          Write-Host "Public test certificate: $publicCert"
-          Write-Host 'Warning: this is a TEST signature, not Microsoft kernel production signing.'
+          Write-Host "Driver signed. Signature status on untrusted runner: $($signature.Status)"
+          Write-Host "Public certificate: $publicCert"
+          Write-Host 'This is a TEST signature, not Microsoft production kernel signing.'
 
       - name: Package optimized binaries
         shell: pwsh
