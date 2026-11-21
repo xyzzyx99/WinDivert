@@ -147,6 +147,9 @@ struct context_s
     WDFWORKITEM worker;                         // Read worker.
     WINDIVERT_LAYER layer;                      // Context's layer.
     UINT64 flags;                               // Context's flags.
+    ULONG watchdog_timeout_ms;                 // 0=disabled (opt-in).
+    ULONGLONG watchdog_last_tick;              // Monotonic 100ns units.
+    BOOL watchdog_expired;                    // Terminal until close.
     BOOL initialized;                           // Context initialized?
     BOOL shutdown_recv;                         // Shutdown recv.
     BOOL shutdown_send;                         // Shutdown send.
@@ -166,6 +169,31 @@ struct context_s
 };
 typedef struct context_s context_s;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(context_s, windivert_context_get);
+/*
+ * Watchdog lease. CALL WITH context->lock HELD. Uses interrupt time, which is
+ * monotonic and safe at DISPATCH_LEVEL; no kernel timer, extra thread or IOCTL.
+ * On expiry, new packets CONTINUE through WFP rather than being diverted.
+ * The client must close/reopen the handle to recover from expiry.
+ */
+static BOOL windivert_watchdog_expired_locked(context_t context)
+{
+    ULONGLONG now;
+    if (context->watchdog_timeout_ms == 0)
+    {
+        return context->watchdog_expired;
+    }
+    if (context->watchdog_expired)
+    {
+        return TRUE;
+    }
+    now = KeQueryInterruptTime();
+    if (now - context->watchdog_last_tick >=
+        (ULONGLONG)context->watchdog_timeout_ms * 10000ULL)
+    {
+        context->watchdog_expired = TRUE;
+    }
+    return context->watchdog_expired;
+}
 
 #define WINDIVERT_TIMEOUT(context, t0, t1)                                  \
      (((t1) >= (t0)? (t1) - (t0): (t0) - (t1)) >                            \
@@ -3320,6 +3348,29 @@ windivert_ioctl_bad_flags:
                     context->packet_queue_maxsize = (ULONG)value;
                     break;
 
+                case WINDIVERT_PARAM_WATCHDOG_TIMEOUT:
+                    if (context->watchdog_expired ||
+                        (value != 0 && (value < 1000 || value > 60000 ||
+                        (context->layer != WINDIVERT_LAYER_NETWORK &&
+                         context->layer != WINDIVERT_LAYER_NETWORK_FORWARD))))
+                    {
+                        KeReleaseInStackQueuedSpinLock(&lock_handle);
+                        status = STATUS_INVALID_PARAMETER;
+                        goto windivert_ioctl_exit;
+                    }
+                    context->watchdog_timeout_ms = (ULONG)value;
+                    context->watchdog_last_tick = KeQueryInterruptTime();
+                    break;
+                case WINDIVERT_PARAM_WATCHDOG_PING:
+                    if (context->watchdog_timeout_ms == 0 ||
+                        windivert_watchdog_expired_locked(context))
+                    {
+                        KeReleaseInStackQueuedSpinLock(&lock_handle);
+                        status = STATUS_INVALID_DEVICE_STATE;
+                        goto windivert_ioctl_exit;
+                    }
+                    context->watchdog_last_tick = KeQueryInterruptTime();
+                    break;
                 default:
                     KeReleaseInStackQueuedSpinLock(&lock_handle);
                     status = STATUS_INVALID_PARAMETER;
@@ -3368,6 +3419,13 @@ windivert_ioctl_bad_flags:
                     break;
                 case WINDIVERT_PARAM_VERSION_MINOR:
                     *valptr = WINDIVERT_VERSION_MINOR;
+                    break;
+                case WINDIVERT_PARAM_WATCHDOG_TIMEOUT:
+                    *valptr = context->watchdog_timeout_ms;
+                    break;
+                case WINDIVERT_PARAM_WATCHDOG_STATUS:
+                    *valptr = (windivert_watchdog_expired_locked(context)? 2:
+                        (context->watchdog_timeout_ms != 0? 1: 0));
                     break;
                 default:
                     KeReleaseInStackQueuedSpinLock(&lock_handle);
@@ -3772,7 +3830,7 @@ static void windivert_network_classify(context_t context,
 
     KeAcquireInStackQueuedSpinLock(&context->lock, &lock_handle);
     if (context->state != WINDIVERT_CONTEXT_STATE_OPEN ||
-        context->shutdown_recv)
+        context->shutdown_recv || windivert_watchdog_expired_locked(context))
     {
         KeReleaseInStackQueuedSpinLock(&lock_handle);
         return;

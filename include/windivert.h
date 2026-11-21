@@ -207,8 +207,12 @@ typedef enum
     WINDIVERT_PARAM_QUEUE_SIZE = 2,     /* Packet queue size. */
     WINDIVERT_PARAM_VERSION_MAJOR = 3,  /* Driver version (major). */
     WINDIVERT_PARAM_VERSION_MINOR = 4,  /* Driver version (minor). */
+    /* Extensions: opt-in per-handle network watchdog (not stock WinDivert). */
+    WINDIVERT_PARAM_WATCHDOG_TIMEOUT = 100, /* 0=off, 1000..60000 ms. */
+    WINDIVERT_PARAM_WATCHDOG_PING = 101,    /* Refresh watchdog lease. */
+    WINDIVERT_PARAM_WATCHDOG_STATUS = 102,  /* 0=off, 1=healthy, 2=expired. */
 } WINDIVERT_PARAM, *PWINDIVERT_PARAM;
-#define WINDIVERT_PARAM_MAX             WINDIVERT_PARAM_VERSION_MINOR
+#define WINDIVERT_PARAM_MAX             WINDIVERT_PARAM_WATCHDOG_STATUS
 
 /*
  * WinDivert shutdown parameter.
